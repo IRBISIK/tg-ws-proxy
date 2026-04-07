@@ -26,7 +26,6 @@ class ProxyConfig:
     host: str = '127.0.0.1'
     secret: str = field(default_factory=lambda: os.urandom(16).hex())
     dc_redirects: Dict[int, str] = field(default_factory=lambda: {2: '149.154.167.220', 4: '149.154.167.220'})
-    dc_overrides: Dict[int, int] = field(default_factory=lambda: {203: 2})
     buffer_size: int = 256 * 1024
     pool_size: int = 4
     fallback_cfproxy: bool = True
@@ -478,7 +477,6 @@ class _MsgSplitter:
 
 
 def _ws_domains(dc: int, is_media) -> List[str]:
-    dc = proxy_config.dc_overrides.get(dc, dc)
     if is_media is None or is_media:
         return [f'kws{dc}-1.web.telegram.org', f'kws{dc}.web.telegram.org']
     return [f'kws{dc}.web.telegram.org', f'kws{dc}-1.web.telegram.org']
@@ -958,7 +956,7 @@ async def _handle_client(reader, writer, secret: bytes):
         media_tag = " media" if is_media else ""
 
         # Fallback if DC not in config or WS blacklisted for this DC/is_media
-        if dc not in proxy_config.dc_redirects or dc_key in ws_blacklist:
+        if dc not in proxy_config.dc_redirects or dc_key in ws_blacklist or dc == 2 and is_media:
             if dc not in proxy_config.dc_redirects:
                 log.info("[%s] DC%d not in config -> fallback",
                          label, dc)
