@@ -2,7 +2,6 @@ import asyncio
 import logging
 import struct
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from typing import Dict, List, Optional
 
 from .utils import *
@@ -10,6 +9,7 @@ from .stats import stats
 from .balancer import balancer
 from .config import proxy_config
 from .raw_websocket import RawWebSocket
+from .crypto import aes_ctr_ctx
 
 
 log = logging.getLogger('tg-mtproto-proxy')
@@ -44,9 +44,7 @@ class MsgSplitter:
     __slots__ = ('_dec', '_proto', '_cipher_buf', '_plain_buf', '_disabled')
 
     def __init__(self, relay_init: bytes, proto_int: int):
-        cipher = Cipher(algorithms.AES(relay_init[8:40]),
-                        modes.CTR(relay_init[40:56]))
-        self._dec = cipher.encryptor()
+        self._dec = aes_ctr_ctx(relay_init[8:40], relay_init[40:56])
         self._dec.update(ZERO_64)
         self._proto = proto_int
         self._cipher_buf = bytearray()

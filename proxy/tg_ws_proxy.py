@@ -14,8 +14,6 @@ import socket as _socket
 from collections import deque
 from typing import Dict, List, Optional, Set, Tuple
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
 if __name__ == '__main__' and (__package__ is None or __package__ == ''):
     _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _repo_root not in sys.path:
@@ -29,6 +27,7 @@ from .bridge import MsgSplitter, CryptoCtx, do_fallback, bridge_ws_reencrypt
 from .raw_websocket import RawWebSocket, WsHandshakeError, set_sock_opts
 from .fake_tls import proxy_to_masking_domain, verify_client_hello, build_server_hello, FakeTlsStream, TLS_RECORD_HANDSHAKE
 from .balancer import balancer
+from .crypto import aes_ctr_ctx
 
 
 log = logging.getLogger('tg-mtproto-proxy')
@@ -47,9 +46,7 @@ def _try_handshake(handshake: bytes, secret: bytes) -> Optional[Tuple[int, bool,
     dec_key = hashlib.sha256(dec_prekey + secret).digest()
 
     dec_iv_int = int.from_bytes(dec_iv, 'big')
-    decryptor = Cipher(
-        algorithms.AES(dec_key), modes.CTR(dec_iv_int.to_bytes(16, 'big'))
-    ).encryptor()
+    decryptor = aes_ctr_ctx(dec_key, dec_iv_int.to_bytes(16, 'big'))
     decrypted = decryptor.update(handshake)
 
     proto_tag = decrypted[PROTO_TAG_POS:PROTO_TAG_POS + 4]
@@ -82,9 +79,7 @@ def _generate_relay_init(proto_tag: bytes, dc_idx: int) -> bytes:
     enc_key = rnd_bytes[SKIP_LEN:SKIP_LEN + PREKEY_LEN]
     enc_iv = rnd_bytes[SKIP_LEN + PREKEY_LEN:SKIP_LEN + PREKEY_LEN + IV_LEN]
 
-    encryptor = Cipher(
-        algorithms.AES(enc_key), modes.CTR(enc_iv)
-    ).encryptor()
+    encryptor = aes_ctr_ctx(enc_key, enc_iv)
 
     dc_bytes = struct.pack('<h', dc_idx)
     tail_plain = proto_tag + dc_bytes + os.urandom(2)
@@ -315,12 +310,8 @@ def _build_crypto_ctx(client_dec_prekey_iv, secret, relay_init):
         clt_enc_prekey_iv[:PREKEY_LEN] + secret).digest()
     clt_enc_iv = clt_enc_prekey_iv[PREKEY_LEN:]
 
-    clt_decryptor = Cipher(
-        algorithms.AES(clt_dec_key), modes.CTR(clt_dec_iv)
-    ).encryptor()
-    clt_encryptor = Cipher(
-        algorithms.AES(clt_enc_key), modes.CTR(clt_enc_iv)
-    ).encryptor()
+    clt_decryptor = aes_ctr_ctx(clt_dec_key, clt_dec_iv)
+    clt_encryptor = aes_ctr_ctx(clt_enc_key, clt_enc_iv)
 
     # fast-forward client decryptor past the 64-byte init
     clt_decryptor.update(ZERO_64)
@@ -335,12 +326,8 @@ def _build_crypto_ctx(client_dec_prekey_iv, secret, relay_init):
     relay_dec_key = relay_dec_prekey_iv[:KEY_LEN]
     relay_dec_iv = relay_dec_prekey_iv[KEY_LEN:]
 
-    tg_encryptor = Cipher(
-        algorithms.AES(relay_enc_key), modes.CTR(relay_enc_iv)
-    ).encryptor()
-    tg_decryptor = Cipher(
-        algorithms.AES(relay_dec_key), modes.CTR(relay_dec_iv)
-    ).encryptor()
+    tg_encryptor = aes_ctr_ctx(relay_enc_key, relay_enc_iv)
+    tg_decryptor = aes_ctr_ctx(relay_dec_key, relay_dec_iv)
 
     tg_encryptor.update(ZERO_64)
 
