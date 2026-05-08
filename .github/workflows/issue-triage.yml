@@ -1,0 +1,34 @@
+name: Auto comment on new issues
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on new issue
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            Спасибо за issue и за помощь проекту ❤️
+
+            Чтобы не терять ваше время, сначала проверьте две вещи:
+            - вы на последней версии: [Releases](https://github.com/${{ github.repository }}/releases)
+            - запускали по инструкции для своей ОС: [Быстрый старт](https://github.com/${{ github.repository }}/blob/main/docs/README.md#-быстрый-старт)
+
+            Если проблема осталась, пожалуйста, допишите в этот issue:
+            - версию `tg-ws-proxy`;
+            - вашу ОС и способ запуска (релизный бинарник / из исходников);
+            - короткое описание, как воспроизвести проблему (если возможно);
+            - лог/текст ошибки или скриншот.
+
+            Частый кейс: если не грузит медиа в Telegram, проверьте раздел в документации  
+            «Не грузит фото/видео?» — [README](https://github.com/${{ github.repository }}/blob/main/docs/README.md#не-грузит-фотовидео).
+
+            После этого мы сможем быстрее воспроизвести проблему и дать точный ответ.
