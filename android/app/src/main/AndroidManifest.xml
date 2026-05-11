@@ -9,6 +9,7 @@
         tools:ignore="ProtectedPermissions" />
 
     <application
+        android:name=".TgWsProxyApp"
         android:allowBackup="true"
         android:label="TG WS Proxy"
         android:icon="@mipmap/ic_launcher"
@@ -38,6 +39,10 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".WatchdogReceiver"
+            android:enabled="true"
+            android:exported="false" />
     </application>
 
 </manifest>

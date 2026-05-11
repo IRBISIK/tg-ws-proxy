@@ -20,6 +20,7 @@ import androidx.core.app.NotificationManagerCompat
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONObject
+import java.io.File
 
 class ProxyService : Service() {
     private var autoStartOnTelegram = true
@@ -32,19 +33,27 @@ class ProxyService : Service() {
     private var lastAutoStartAttemptMs = 0L
     private var pendingAutoStartAfterManualStop = false
     private var telegramUseTimeAtManualStop = 0L
+    private var desiredProxyRunning = false
+    private var lastBridgeRunning = false
+    private var lastBridgeError = ""
+    private var lastBridgeStatusAtMs = 0L
+    private var lastTelegramActive = false
+    private var lastTelegramCheckAtMs = 0L
     private val notificationHandler = Handler(Looper.getMainLooper())
     private val notificationUpdater = object : Runnable {
         override fun run() {
             NotificationManagerCompat.from(this@ProxyService).notify(NOTIFICATION_ID, buildNotification())
-            notificationHandler.postDelayed(this, 5000)
+            notificationHandler.postDelayed(this, nextMonitorDelayMs())
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
+        restoreRuntimeState()
+        scheduleWatchdog()
 
-        val action = intent?.action ?: ACTION_START
+        val action = intent?.action ?: ACTION_ENSURE_MONITOR
         if (action == ACTION_ENSURE_MONITOR) {
             val cfgJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
                 ?: loadSavedConfigJson()
@@ -62,6 +71,9 @@ class ProxyService : Service() {
             manualStopRequested = false
             notificationHandler.removeCallbacks(notificationUpdater)
             notificationHandler.post(notificationUpdater)
+            if (desiredProxyRunning && !readBridgeStatusCached().first) {
+                startPythonProxy(cfgJson, logFile)
+            }
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification())
             return START_STICKY
         }
@@ -72,6 +84,8 @@ class ProxyService : Service() {
             manualStopRequested = false
             pendingAutoStartAfterManualStop = true
             telegramUseTimeAtManualStop = latestTelegramUseTime()
+            desiredProxyRunning = false
+            persistRuntimeState()
             startedAtMs = 0L
             stopPythonProxy()
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification())
@@ -95,6 +109,10 @@ class ProxyService : Service() {
         autoStartOnTelegram = cfg.autoStartOnTelegram
         if (startedAtMs == 0L) startedAtMs = System.currentTimeMillis()
         manualStopRequested = false
+        pendingAutoStartAfterManualStop = false
+        telegramUseTimeAtManualStop = 0L
+        desiredProxyRunning = true
+        persistRuntimeState()
         startPythonProxy(cfgJson, logFile)
         NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification())
         notificationHandler.removeCallbacks(notificationUpdater)
@@ -104,6 +122,7 @@ class ProxyService : Service() {
 
     override fun onDestroy() {
         notificationHandler.removeCallbacks(notificationUpdater)
+        scheduleWatchdog()
         if (manualStopRequested) {
             stopPythonProxy()
         } else {
@@ -115,6 +134,7 @@ class ProxyService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         // User removed app from recents: keep foreground proxy service alive.
+        scheduleWatchdog()
         restartSelf()
         super.onTaskRemoved(rootIntent)
     }
@@ -151,7 +171,7 @@ class ProxyService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val uptimeMinutes = ((System.currentTimeMillis() - startedAtMs).coerceAtLeast(0L) / 60000L)
-        val bridge = readBridgeStatus()
+        val bridge = readBridgeStatusCached()
         maybeAutoStartByTelegram(bridge.first)
         val state = if (bridge.first) "ON" else "OFF"
         val mode = if (autoStartOnTelegram) "auto" else "manual"
@@ -187,9 +207,13 @@ class ProxyService : Service() {
     }
 
     companion object {
-        private const val PREFS_NAME = "proxy_service_state"
+        const val PREFS_NAME = "proxy_service_state"
+        const val KEY_MONITOR_ENABLED = "monitor_enabled"
         private const val KEY_CONFIG_JSON = "config_json"
         private const val KEY_LOG_FILE = "log_file"
+        private const val KEY_PENDING_AFTER_STOP = "pending_after_stop"
+        private const val KEY_TELEGRAM_USE_AT_STOP = "telegram_use_at_stop"
+        private const val KEY_DESIRED_PROXY_RUNNING = "desired_proxy_running"
         private const val CHANNEL_ID = "tg_ws_proxy_service"
         private const val NOTIFICATION_ID = 31
         private const val ACTION_START = "com.flowseal.tgwsproxy.action.START"
@@ -199,6 +223,10 @@ class ProxyService : Service() {
         private const val EXTRA_LOG_FILE = "log_file"
 
         fun start(context: Context, config: ProxyConfig, logFile: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_MONITOR_ENABLED, true)
+                .apply()
             val payload = config.toJson()
             val intent = Intent(context, ProxyService::class.java).apply {
                 action = ACTION_START
@@ -213,7 +241,20 @@ class ProxyService : Service() {
             context.startService(intent)
         }
 
+        fun shouldAutoHealMonitor(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (prefs.getBoolean(KEY_MONITOR_ENABLED, false)) return true
+            if (prefs.getBoolean(KEY_DESIRED_PROXY_RUNNING, false)) return true
+            if (prefs.getBoolean(KEY_PENDING_AFTER_STOP, false)) return true
+            if (prefs.getString(KEY_CONFIG_JSON, null) != null) return true
+            return File(context.filesDir, MainActivity.CONFIG_FILE_NAME).exists()
+        }
+
         fun ensureMonitor(context: Context, config: ProxyConfig? = null, logFile: String? = null) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_MONITOR_ENABLED, true)
+                .apply()
             val intent = Intent(context, ProxyService::class.java).apply {
                 action = ACTION_ENSURE_MONITOR
             }
@@ -239,6 +280,19 @@ class ProxyService : Service() {
         } catch (e: Exception) {
             false to (e.message ?: "bridge error")
         }
+    }
+
+    private fun readBridgeStatusCached(force: Boolean = false): Pair<Boolean, String> {
+        val now = System.currentTimeMillis()
+        val ttl = if (lastBridgeRunning) 8_000L else 15_000L
+        if (!force && now - lastBridgeStatusAtMs < ttl) {
+            return lastBridgeRunning to lastBridgeError
+        }
+        val status = readBridgeStatus()
+        lastBridgeRunning = status.first
+        lastBridgeError = status.second
+        lastBridgeStatusAtMs = now
+        return status
     }
 
     private fun restartSelf() {
@@ -281,7 +335,7 @@ class ProxyService : Service() {
     private fun maybeAutoStartByTelegram(isProxyRunning: Boolean) {
         if (!autoStartOnTelegram || isProxyRunning) return
         if (!hasUsageStatsPermission()) return
-        val telegramActive = isTelegramActive()
+        val telegramActive = isTelegramActiveCached()
         if (pendingAutoStartAfterManualStop) {
             val currentUseTime = latestTelegramUseTime()
             if (currentUseTime <= telegramUseTimeAtManualStop + 1000L) {
@@ -298,6 +352,8 @@ class ProxyService : Service() {
         startPythonProxy(cfg, log)
         pendingAutoStartAfterManualStop = false
         telegramUseTimeAtManualStop = 0L
+        desiredProxyRunning = true
+        persistRuntimeState()
         if (startedAtMs == 0L) startedAtMs = System.currentTimeMillis()
     }
 
@@ -314,6 +370,17 @@ class ProxyService : Service() {
     private fun isTelegramActive(): Boolean {
         if (isTelegramForegroundByEvents()) return true
         return isTelegramRecentlyUsedByStats()
+    }
+
+    private fun isTelegramActiveCached(force: Boolean = false): Boolean {
+        val now = System.currentTimeMillis()
+        val ttl = 5_000L
+        if (!force && now - lastTelegramCheckAtMs < ttl) {
+            return lastTelegramActive
+        }
+        lastTelegramActive = isTelegramActive()
+        lastTelegramCheckAtMs = now
+        return lastTelegramActive
     }
 
     private fun isTelegramForegroundByEvents(): Boolean {
@@ -367,4 +434,32 @@ class ProxyService : Service() {
 
     private fun defaultLogFilePath(): String =
         "${filesDir.absolutePath}/tg_ws_proxy.log"
+
+    private fun scheduleWatchdog() {
+        WatchdogScheduler.schedule(this)
+    }
+
+    private fun nextMonitorDelayMs(): Long {
+        return when {
+            lastBridgeRunning -> 10_000L
+            autoStartOnTelegram -> 6_000L
+            else -> 20_000L
+        }
+    }
+
+    private fun persistRuntimeState() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_PENDING_AFTER_STOP, pendingAutoStartAfterManualStop)
+            .putLong(KEY_TELEGRAM_USE_AT_STOP, telegramUseTimeAtManualStop)
+            .putBoolean(KEY_DESIRED_PROXY_RUNNING, desiredProxyRunning)
+            .apply()
+    }
+
+    private fun restoreRuntimeState() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        pendingAutoStartAfterManualStop = prefs.getBoolean(KEY_PENDING_AFTER_STOP, false)
+        telegramUseTimeAtManualStop = prefs.getLong(KEY_TELEGRAM_USE_AT_STOP, 0L)
+        desiredProxyRunning = prefs.getBoolean(KEY_DESIRED_PROXY_RUNNING, false)
+    }
 }

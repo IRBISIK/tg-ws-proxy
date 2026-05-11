@@ -61,7 +61,11 @@ import java.io.File
 import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
-    private val configFileName = "tg_ws_proxy_config.json"
+    companion object {
+        const val CONFIG_FILE_NAME = "tg_ws_proxy_config.json"
+    }
+
+    private val configFileName = CONFIG_FILE_NAME
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

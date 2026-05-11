@@ -11,7 +11,9 @@ class BootCompletedReceiver : BroadcastReceiver() {
             action == Intent.ACTION_BOOT_COMPLETED ||
             action == Intent.ACTION_MY_PACKAGE_REPLACED
         ) {
-            ProxyService.ensureMonitor(context.applicationContext)
+            val app = context.applicationContext
+            WatchdogScheduler.schedule(app)
+            ProxyService.ensureMonitor(app)
         }
     }
 }
