@@ -1,8 +1,12 @@
 package com.flowseal.tgwsproxy.android
 
 import android.content.Intent
+import android.app.AppOpsManager
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.Process
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -45,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import com.chaquo.python.Python
@@ -79,6 +84,7 @@ class MainActivity : ComponentActivity() {
                         onStopProxy = { ProxyService.stop(this) },
                         proxyStatus = { readBridgeStatus() },
                         logText = { readLogTail() },
+                        readiness = { readAppReadiness() },
                         onOpenTelegram = { url ->
                             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                         },
@@ -152,6 +158,24 @@ class MainActivity : ComponentActivity() {
             "Не удалось прочитать логи: ${e.message}"
         }
     }
+
+    private fun readAppReadiness(): AppReadiness {
+        val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val usageMode = appOps.checkOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            packageName,
+        )
+        val usageAccess = usageMode == AppOpsManager.MODE_ALLOWED
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val ignoreBattery = power.isIgnoringBatteryOptimizations(packageName)
+        val monitorConfigured = File(filesDir, configFileName).exists()
+        return AppReadiness(
+            usageAccessGranted = usageAccess,
+            batteryOptimizationDisabled = ignoreBattery,
+            configSaved = monitorConfigured,
+        )
+    }
 }
 
 data class ProxyConfig(
@@ -215,6 +239,12 @@ data class ProxyConfig(
     }
 }
 
+data class AppReadiness(
+    val usageAccessGranted: Boolean,
+    val batteryOptimizationDisabled: Boolean,
+    val configSaved: Boolean,
+)
+
 private fun randomSecret(): String {
     val chars = "0123456789abcdef"
     return buildString {
@@ -231,6 +261,7 @@ private fun ProxyScreen(
     onStopProxy: () -> Unit,
     proxyStatus: () -> Pair<Boolean, String>,
     logText: () -> String,
+    readiness: () -> AppReadiness,
     onOpenTelegram: (String) -> Unit,
 ) {
     var host by remember { mutableStateOf(initial.host) }
@@ -242,6 +273,15 @@ private fun ProxyScreen(
     var isRunning by remember { mutableStateOf(false) }
     var lastError by remember { mutableStateOf("") }
     var logs by remember { mutableStateOf("Логи появятся после запуска прокси.") }
+    var appReadiness by remember {
+        mutableStateOf(
+            AppReadiness(
+                usageAccessGranted = false,
+                batteryOptimizationDisabled = false,
+                configSaved = false,
+            ),
+        )
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -249,6 +289,7 @@ private fun ProxyScreen(
             isRunning = status.first
             lastError = status.second
             logs = logText()
+            appReadiness = readiness()
             delay(1500)
         }
     }
@@ -258,6 +299,7 @@ private fun ProxyScreen(
     ) {
         info = "Проверьте, что для TG WS Proxy включен Usage Access."
     }
+    val context = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -303,6 +345,29 @@ private fun ProxyScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isRunning) Color(0xFFB8F5D8) else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Готовность системы", fontWeight = FontWeight.SemiBold)
+                    ReadinessRow("Usage Access", appReadiness.usageAccessGranted)
+                    ReadinessRow("Сняты ограничения батареи", appReadiness.batteryOptimizationDisabled)
+                    ReadinessRow("Конфиг сохранен", appReadiness.configSaved)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton(
+                            onClick = {
+                                usageAccessLauncher.launch(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                            },
+                        ) { Text("Usage Access") }
+                        FilledTonalButton(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            },
+                        ) { Text("Батарея") }
+                    }
                 }
             }
             if (lastError.isNotBlank()) {
@@ -367,7 +432,7 @@ private fun ProxyScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Выдать Usage Access для автостарта")
+                        Text("Открыть настройки автостарта")
                     }
                 }
             }
@@ -424,6 +489,22 @@ private fun ProxyScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ReadinessRow(title: String, ok: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            if (ok) "OK" else "Нужно включить",
+            color = if (ok) Color(0xFF25C067) else MaterialTheme.colorScheme.error,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
