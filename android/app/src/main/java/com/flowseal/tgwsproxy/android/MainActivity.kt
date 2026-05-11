@@ -3,8 +3,12 @@ package com.flowseal.tgwsproxy.android
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -25,6 +29,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -35,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,14 +60,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val initialConfig = loadConfig()
+        ProxyService.ensureMonitor(this, initialConfig, logFile().absolutePath)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     ProxyScreen(
-                        initial = loadConfig(),
-                        onSave = { saveConfig(it) },
+                        initial = initialConfig,
+                        onSave = {
+                            saveConfig(it)
+                            ProxyService.ensureMonitor(this, it, logFile().absolutePath)
+                        },
                         onStartProxy = { cfg ->
                             saveConfig(cfg)
+                            ProxyService.ensureMonitor(this, cfg, logFile().absolutePath)
                             ProxyService.start(this, cfg, logFile().absolutePath)
                         },
                         onStopProxy = { ProxyService.stop(this) },
@@ -94,6 +106,7 @@ class MainActivity : ComponentActivity() {
                 cfProxyPriority = root.optBoolean("cfproxy_priority", true),
                 cfProxyUserDomain = root.optString("cfproxy_user_domain", ""),
                 appearance = root.optString("appearance", "auto"),
+                autoStartOnTelegram = root.optBoolean("auto_start_on_telegram", true),
             )
         } catch (_: Exception) {
             ProxyConfig.default()
@@ -110,6 +123,7 @@ class MainActivity : ComponentActivity() {
             put("cfproxy_priority", config.cfProxyPriority)
             put("cfproxy_user_domain", config.cfProxyUserDomain)
             put("appearance", config.appearance)
+            put("auto_start_on_telegram", config.autoStartOnTelegram)
         }
         File(filesDir, configFileName).writeText(root.toString(2))
     }
@@ -149,6 +163,7 @@ data class ProxyConfig(
     val cfProxyPriority: Boolean,
     val cfProxyUserDomain: String,
     val appearance: String,
+    val autoStartOnTelegram: Boolean,
 ) {
     fun tgUrl(): String = "tg://proxy?server=$host&port=$port&secret=dd$secret"
     fun toJson(): String = JSONObject().apply {
@@ -160,6 +175,7 @@ data class ProxyConfig(
         put("cfproxy_priority", cfProxyPriority)
         put("cfproxy_user_domain", cfProxyUserDomain)
         put("appearance", appearance)
+        put("auto_start_on_telegram", autoStartOnTelegram)
         put("buf_kb", 256)
         put("pool_size", 4)
         put("verbose", false)
@@ -181,6 +197,7 @@ data class ProxyConfig(
                 cfProxyPriority = root.optBoolean("cfproxy_priority", true),
                 cfProxyUserDomain = root.optString("cfproxy_user_domain", ""),
                 appearance = root.optString("appearance", "auto"),
+                autoStartOnTelegram = root.optBoolean("auto_start_on_telegram", true),
             )
         }
 
@@ -193,6 +210,7 @@ data class ProxyConfig(
             cfProxyPriority = true,
             cfProxyUserDomain = "",
             appearance = "auto",
+            autoStartOnTelegram = true,
         )
     }
 }
@@ -219,6 +237,7 @@ private fun ProxyScreen(
     var port by remember { mutableStateOf(initial.port.toString()) }
     var secret by remember { mutableStateOf(initial.secret) }
     var dcIpText by remember { mutableStateOf(initial.dcIp.joinToString("\n")) }
+    var autoStartOnTelegram by remember { mutableStateOf(initial.autoStartOnTelegram) }
     var info by remember { mutableStateOf("Готово к запуску") }
     var isRunning by remember { mutableStateOf(false) }
     var lastError by remember { mutableStateOf("") }
@@ -232,6 +251,12 @@ private fun ProxyScreen(
             logs = logText()
             delay(1500)
         }
+    }
+
+    val usageAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) {
+        info = "Проверьте, что для TG WS Proxy включен Usage Access."
     }
 
     Scaffold(
@@ -286,6 +311,7 @@ private fun ProxyScreen(
 
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Параметры прокси", fontWeight = FontWeight.SemiBold)
                     OutlinedTextField(
                         value = host,
                         onValueChange = { host = it },
@@ -310,6 +336,39 @@ private fun ProxyScreen(
                         label = { Text("DC -> IP (one per line)") },
                         modifier = Modifier.fillMaxWidth().height(130.dp),
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Автостарт при запуске Telegram", fontWeight = FontWeight.Medium)
+                            Text(
+                                "Если прокси выключен, сервис автоматически запустит его при открытии Telegram.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = autoStartOnTelegram,
+                            onCheckedChange = {
+                                autoStartOnTelegram = it
+                                info = if (it) {
+                                    "Автостарт включен. Выдайте Usage Access."
+                                } else {
+                                    "Автостарт отключен."
+                                }
+                            },
+                        )
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            usageAccessLauncher.launch(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Выдать Usage Access для автостарта")
+                    }
                 }
             }
 
@@ -322,25 +381,34 @@ private fun ProxyScreen(
                 cfProxyPriority = true,
                 cfProxyUserDomain = "",
                 appearance = "auto",
+                autoStartOnTelegram = autoStartOnTelegram,
             )
 
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    onSave(cfg)
-                    info = "Конфиг сохранен"
-                }) { Text("Сохранить") }
-                FilledTonalButton(onClick = {
-                    onStartProxy(cfg)
-                    info = "Запуск прокси..."
-                }) { Text("Старт") }
-                FilledTonalButton(onClick = {
-                    onStopProxy()
-                    info = "Остановка прокси..."
-                }) { Text("Стоп") }
-            }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onOpenTelegram(cfg.tgUrl()) }) { Text("Открыть в Telegram") }
-                TextButton(onClick = { info = "Ссылка: ${cfg.tgUrl()}" }) { Text("Показать ссылку") }
+            Card {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Быстрые действия", fontWeight = FontWeight.SemiBold)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            onStartProxy(cfg)
+                            info = "Запуск прокси..."
+                        }) { Text("Старт прокси") }
+                        FilledTonalButton(onClick = {
+                            onStopProxy()
+                            info = "Остановка прокси..."
+                        }) { Text("Стоп прокси") }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton(onClick = {
+                            onSave(cfg)
+                            info = "Конфиг сохранен и монитор автостарта обновлен"
+                        }) { Text("Сохранить настройки") }
+                        TextButton(onClick = { info = "Ссылка: ${cfg.tgUrl()}" }) { Text("Показать ссылку") }
+                    }
+                    Button(
+                        onClick = { onOpenTelegram(cfg.tgUrl()) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Открыть Telegram с прокси") }
+                }
             }
 
             Text(info, style = MaterialTheme.typography.bodyMedium)

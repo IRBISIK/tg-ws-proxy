@@ -5,12 +5,16 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.chaquo.python.Python
@@ -18,6 +22,7 @@ import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONObject
 
 class ProxyService : Service() {
+    private var autoStartOnTelegram = true
     private var startedAtMs: Long = 0L
     private var activeHost: String = "127.0.0.1"
     private var activePort: Int = 1443
@@ -37,6 +42,28 @@ class ProxyService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
 
         val action = intent?.action ?: ACTION_START
+        if (action == ACTION_ENSURE_MONITOR) {
+            val cfgJson = intent.getStringExtra(EXTRA_CONFIG_JSON) ?: loadSavedConfigJson()
+            val logFile = intent.getStringExtra(EXTRA_LOG_FILE) ?: loadSavedLogFile()
+            if (cfgJson != null && logFile != null) {
+                val cfg = ProxyConfig.fromJson(cfgJson)
+                activeHost = cfg.host
+                activePort = cfg.port
+                autoStartOnTelegram = cfg.autoStartOnTelegram
+                lastConfigJson = cfgJson
+                lastLogFile = logFile
+                saveState(cfgJson, logFile)
+                manualStopRequested = false
+                notificationHandler.removeCallbacks(notificationUpdater)
+                notificationHandler.post(notificationUpdater)
+                NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification())
+                return START_STICKY
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         if (action == ACTION_STOP) {
             manualStopRequested = true
             clearPersistedState()
@@ -55,6 +82,7 @@ class ProxyService : Service() {
         saveState(cfgJson, logFile)
         activeHost = cfg.host
         activePort = cfg.port
+        autoStartOnTelegram = cfg.autoStartOnTelegram
         if (startedAtMs == 0L) startedAtMs = System.currentTimeMillis()
         manualStopRequested = false
         startPythonProxy(cfgJson, logFile)
@@ -114,8 +142,10 @@ class ProxyService : Service() {
         )
         val uptimeMinutes = ((System.currentTimeMillis() - startedAtMs).coerceAtLeast(0L) / 60000L)
         val bridge = readBridgeStatus()
+        maybeAutoStartByTelegram(bridge.first)
         val state = if (bridge.first) "ON" else "OFF"
-        val statusText = "[$state] $activeHost:$activePort | uptime ${uptimeMinutes}m"
+        val mode = if (autoStartOnTelegram) "auto" else "manual"
+        val statusText = "[$state/$mode] $activeHost:$activePort | uptime ${uptimeMinutes}m"
         val details = if (bridge.second.isNotBlank()) {
             "$statusText\nОшибка: ${bridge.second.take(120)}"
         } else {
@@ -154,6 +184,7 @@ class ProxyService : Service() {
         private const val NOTIFICATION_ID = 31
         private const val ACTION_START = "com.flowseal.tgwsproxy.action.START"
         private const val ACTION_STOP = "com.flowseal.tgwsproxy.action.STOP"
+        private const val ACTION_ENSURE_MONITOR = "com.flowseal.tgwsproxy.action.ENSURE_MONITOR"
         private const val EXTRA_CONFIG_JSON = "config_json"
         private const val EXTRA_LOG_FILE = "log_file"
 
@@ -170,6 +201,19 @@ class ProxyService : Service() {
         fun stop(context: Context) {
             val intent = Intent(context, ProxyService::class.java).apply { action = ACTION_STOP }
             context.startService(intent)
+        }
+
+        fun ensureMonitor(context: Context, config: ProxyConfig? = null, logFile: String? = null) {
+            val intent = Intent(context, ProxyService::class.java).apply { action = ACTION_ENSURE_MONITOR }
+            if (config != null && !logFile.isNullOrBlank()) {
+                putExtra(EXTRA_CONFIG_JSON, config.toJson())
+                putExtra(EXTRA_LOG_FILE, logFile)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
         }
     }
 
@@ -221,4 +265,42 @@ class ProxyService : Service() {
 
     private fun loadSavedLogFile(): String? =
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_LOG_FILE, null)
+
+    private fun maybeAutoStartByTelegram(isProxyRunning: Boolean) {
+        if (!autoStartOnTelegram || isProxyRunning) return
+        if (!hasUsageStatsPermission()) return
+        if (!isTelegramForeground()) return
+        val cfg = lastConfigJson ?: loadSavedConfigJson() ?: return
+        val log = lastLogFile ?: loadSavedLogFile() ?: return
+        startPythonProxy(cfg, log)
+        if (startedAtMs == 0L) startedAtMs = System.currentTimeMillis()
+    }
+
+    private fun hasUsageStatsPermission(): Boolean {
+        val manager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = manager.checkOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            packageName,
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun isTelegramForeground(): Boolean {
+        val usage = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val end = System.currentTimeMillis()
+        val begin = end - 15_000L
+        val events = usage.queryEvents(begin, end)
+        val event = UsageEvents.Event()
+        var lastForegroundPkg: String? = null
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+                lastForegroundPkg = event.packageName
+            }
+        }
+        return lastForegroundPkg == "org.telegram.messenger" ||
+            lastForegroundPkg == "org.telegram.plus" ||
+            lastForegroundPkg == "org.thunderdog.challegram"
+    }
 }
